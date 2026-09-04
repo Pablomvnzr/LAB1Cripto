@@ -36,12 +36,10 @@ def create_realistic_icmp_packet(data, sequence, identifier):
                               identifier, sequence)
     
     # Add payload with realistic padding
-    # Real ping uses data like "abcdefghijklmnopqrstuvwabcdefghi"
-    # We'll use our character but add padding to match standard ping size
+    # El payload DEBE ser EXACTAMENTE el carácter que queremos enviar
     payload = data.encode('utf-8')
     
     # Pad to typical ping payload size (48 bytes - 64 bytes)
-    # This makes packets look like standard ping
     padding_size = random.choice([48, 56, 64]) - len(payload)
     if padding_size > 0:
         # Add realistic padding with incremental bytes
@@ -85,16 +83,7 @@ def generate_identifier():
     """
     Generate a realistic identifier like real ping
     """
-    # Real ping uses process ID or random values
     return os.getpid() & 0xFFFF
-
-def generate_realistic_delay():
-    """
-    Generate realistic delays between packets
-    Real ping has consistent but slightly varying delays
-    """
-    # Base delay around 0.1-0.3 seconds with slight variation
-    return random.uniform(0.08, 0.15)
 
 def send_ping_sequence(ip):
     """
@@ -102,27 +91,64 @@ def send_ping_sequence(ip):
     """
     print(f"Sending baseline ping to {ip}...")
     try:
-        # Use system ping to establish normal traffic pattern
         os.system(f"ping -c 1 -W 1 {ip} > /dev/null 2>&1")
         return True
     except:
         return False
 
 def main():
-    # Check command line arguments
-    if len(sys.argv) != 2:
-        print("Usage: sudo python3 pingv4.py \"text to send\"")
-        print("Example: sudo python3 pingv4.py \"larycxojxrji h bnovjajrji nw anmcb\"")
+    # ============================================================
+    # DETECCIÓN DE ARGUMENTOS - IP DESTINO OPCIONAL
+    # ============================================================
+    
+    # Caso 1: Solo texto (usa 8.8.8.8 por defecto)
+    if len(sys.argv) == 2:
+        text = sys.argv[1]
+        dest_ip = "8.8.8.8"
+        modo = "REMOTO (8.8.8.8)"
+    
+    # Caso 2: Texto + IP destino
+    elif len(sys.argv) == 3:
+        text = sys.argv[1]
+        dest_ip = sys.argv[2]
+        # Detectar si es loopback
+        if dest_ip == "127.0.0.1" or dest_ip == "localhost":
+            modo = "LOOPBACK"
+        else:
+            modo = f"REMOTO ({dest_ip})"
+    
+    # Caso 3: Argumentos incorrectos
+    else:
+        print("\n" + "="*60)
+        print("ICMP Stealth Sender - Laboratorio 1")
+        print("="*60)
+        print("\nUSO:")
+        print('  sudo python3 pingv4.py "texto"              → Envía a 8.8.8.8')
+        print('  sudo python3 pingv4.py "texto" 127.0.0.1   → Envía a loopback')
+        print('  sudo python3 pingv4.py "texto" IP          → Envía a IP específica')
+        print("\nEJEMPLOS:")
+        print('  sudo python3 pingv4.py "larycxojxrji h bnovjajrji nw anmcb"')
+        print('  sudo python3 pingv4.py "test" 127.0.0.1')
+        print("="*60)
         sys.exit(1)
     
-    # Get text to send
-    text = sys.argv[1]
-    
-    # Destination IP (make it configurable)
-    dest_ip = "8.8.8.8"  # Google DNS
+    # ============================================================
+    # CONFIGURACIÓN
+    # ============================================================
     
     # Generate consistent identifier for all packets (like real ping)
     identifier = generate_identifier()
+    
+    print(f"\n{'='*60}")
+    print(f"ICMP Stealth Sender - Laboratorio 1")
+    print(f"{'='*60}")
+    print(f"Texto a enviar: '{text}'")
+    print(f"Longitud: {len(text)} caracteres")
+    print(f"IP destino: {dest_ip}")
+    print(f"Modo: {modo}")
+    print(f"ICMP Identifier: 0x{identifier:04x} (PID: {identifier})")
+    print(f"Intervalo: 1 segundo entre paquetes (REQUISITO LABORATORIO)")
+    print(f"{'='*60}\n")
     
     # Send a real ping first to establish baseline
     print("\n=== Establishing normal traffic pattern ===")
@@ -130,7 +156,7 @@ def main():
     time.sleep(0.5)
     
     print(f"\n=== Sending {len(text)} characters via ICMP ===")
-    print("Packets mimic real ping behavior\n")
+    print("Cada paquete se envía con intervalo de 1 segundo\n")
     
     # Send each character via ICMP
     total_chars = len(text)
@@ -140,13 +166,18 @@ def main():
         # Use sequence number (increments like real ping)
         sequence = i
         
-        # Send character in ICMP data field with realistic packet
+        # Enviar el carácter
         if send_icmp_packet(dest_ip, char, sequence, identifier):
             success_count += 1
-            print(f".\nSent {i} packets.")
+            # Mostrar con indicador de loopback si corresponde
+            if modo == "LOOPBACK":
+                print(f"  [{i:3d}] 🔄 '{char}' (0x{ord(char):02x}) enviado | Seq: {i} [LOOPBACK]")
+            else:
+                print(f"  [{i:3d}] '{char}' (0x{ord(char):02x}) enviado | Seq: {i}")
             
-            # Random but realistic delay
-            time.sleep(generate_realistic_delay())
+            # ESPERA DE EXACTAMENTE 1 SEGUNDO
+            if i < total_chars:
+                time.sleep(1.0)
         else:
             print(f"\nFailed to send packet {i}")
             sys.exit(1)
@@ -157,9 +188,11 @@ def main():
     send_ping_sequence(dest_ip)
     
     print(f"\n✓ Successfully sent {success_count}/{total_chars} characters")
+    print(f"✓ Intervalo de 1 segundo entre paquetes")
+    print(f"✓ IP destino: {dest_ip}")
+    if modo == "LOOPBACK":
+        print("✓ Modo LOOPBACK activado (127.0.0.1)")
     print("✓ Traffic mimics real ping behavior")
 
 if __name__ == "__main__":
     main()
-
-

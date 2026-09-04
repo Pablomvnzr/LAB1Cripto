@@ -3,23 +3,29 @@
 readv2.py – ICMP Caesar-cipher reader
 Detects sender ID and shows ALL 26 Caesar shifts
 Improved with Spanish dictionary for better accuracy
+Supports: live capture (Scapy) OR PCAP file (tcpdump)
 """
 
 import sys
 import time
 import re
+import subprocess
+import os
 from collections import defaultdict, Counter
 
 try:
-    from scapy.all import sniff, ICMP, Raw
+    from scapy.all import sniff, ICMP, Raw, rdpcap
+    SCAPY_AVAILABLE = True
 except ImportError:
-    print("ERROR: Scapy not installed. Install with: pip install scapy")
-    sys.exit(1)
+    SCAPY_AVAILABLE = False
+    print("WARNING: Scapy not installed. PCAP reading will use tcpdump fallback.")
+    print("Install with: pip install scapy")
 
 # ── Colores ANSI ──────────────────────────────────────────────────────────────
 GREEN  = '\033[92m'
 CYAN   = '\033[96m'
 RED    = '\033[91m'
+YELLOW = '\033[93m'
 DIM    = '\033[2m'
 BOLD   = '\033[1m'
 RESET  = '\033[0m'
@@ -49,7 +55,8 @@ SPANISH_WORDS = {
     'si', 'no', 'tal', 'vez', 'tener', 'hacer', 'decir', 'ver', 'poder',
     'saber', 'ser', 'estar', 'ir', 'venir', 'dar', 'tomar', 'llevar',
     'dejar', 'mirar', 'escuchar', 'hablar', 'preguntar', 'responder',
-    'entrar', 'salir', 'subir', 'bajar', 'correr', 'caminar', 'saltar'
+    'entrar', 'salir', 'subir', 'bajar', 'correr', 'caminar', 'saltar',
+    'texto', 'mensaje', 'correo', 'llamada', 'telefono', 'computadora'
 }
 
 # ── Letter-frequency tables ──────────────────────────────────────────────────
@@ -180,7 +187,91 @@ def find_best_shift(results: list) -> int:
             best_shift = shift
     return best_shift
 
-# ── Packet capture with Scapy ─────────────────────────────────────────────────
+# ── PCAP Reader (using tcpdump fallback) ─────────────────────────────────────
+
+def read_pcap_tcpdump(pcap_file: str) -> dict:
+    """
+    Lee un archivo PCAP usando tcpdump (fallback cuando Scapy no está disponible)
+    """
+    try:
+        print(f"[*] Reading PCAP with tcpdump: {pcap_file}")
+        
+        cmd = ['tcpdump', '-r', pcap_file, '-n', '-v', '-x', 'icmp']
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        
+        if result.returncode != 0:
+            print(f"[!] tcpdump error: {result.stderr}")
+            return {}
+        
+        captured = {}
+        sequence = 0
+        lines = result.stdout.split('\n')
+        
+        for i, line in enumerate(lines):
+            if 'ICMP echo request' in line:
+                # Extraer sequence
+                seq_match = re.search(r'seq\s+(\d+)', line)
+                if seq_match:
+                    sequence = int(seq_match.group(1))
+                    
+                    # Buscar payload en líneas siguientes
+                    for j in range(i + 1, min(i + 10, len(lines))):
+                        hex_line = lines[j].strip()
+                        if hex_line.startswith('0x'):
+                            hex_bytes = re.findall(r'[0-9a-f]{2}', hex_line)
+                            if hex_bytes:
+                                # Buscar primer byte imprimible
+                                for byte_hex in hex_bytes:
+                                    byte_val = int(byte_hex, 16)
+                                    if 32 <= byte_val <= 126:
+                                        char = chr(byte_val)
+                                        if char.isalnum() or char in ' .,!?':
+                                            captured[sequence] = char
+                                            print(f"  Seq {sequence:3d} → '{char}' (0x{byte_val:02x})")
+                                            break
+                                break
+        
+        return captured
+        
+    except FileNotFoundError:
+        print("[!] tcpdump not found. Install with: brew install tcpdump")
+        return {}
+    except Exception as e:
+        print(f"[!] Error reading PCAP: {e}")
+        return {}
+
+def read_pcap_scapy(pcap_file: str) -> dict:
+    """
+    Lee un archivo PCAP usando Scapy
+    """
+    if not SCAPY_AVAILABLE:
+        return read_pcap_tcpdump(pcap_file)
+    
+    try:
+        print(f"[*] Reading PCAP with Scapy: {pcap_file}")
+        packets = rdpcap(pcap_file)
+        captured = {}
+        
+        for packet in packets:
+            if packet.haslayer(ICMP) and packet.haslayer(Raw):
+                icmp = packet[ICMP]
+                if icmp.type == 8:  # Echo Request
+                    raw_data = packet[Raw].load
+                    if len(raw_data) > 0:
+                        char_byte = raw_data[0]
+                        if 32 <= char_byte <= 126:
+                            char = chr(char_byte)
+                            seq = icmp.seq
+                            captured[seq] = char
+                            print(f"  Seq {seq:3d} → '{char}' (0x{char_byte:02x})")
+        
+        return captured
+        
+    except Exception as e:
+        print(f"[!] Scapy error: {e}, falling back to tcpdump...")
+        return read_pcap_tcpdump(pcap_file)
+
+# ── Packet capture with Scapy (live) ─────────────────────────────────────────
 
 class ICMPCapture:
     def __init__(self):
@@ -231,6 +322,11 @@ class ICMPCapture:
                 print(f"[+] Seq {seq:3d} -> '{char}' (total: {len(self.captured)})")
 
 def capture_packets(timeout=60):
+    if not SCAPY_AVAILABLE:
+        print("[!] Scapy not available. Cannot capture live packets.")
+        print("    Use --pcap option to read a PCAP file instead.")
+        return {}
+    
     print(f"{CYAN}[*] Starting packet capture with Scapy…{RESET}")
     print(f"[*] Listening for ICMP Echo Requests (timeout={timeout}s)")
     
@@ -304,18 +400,20 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(
-        description='ICMP Caesar-cipher reader',
+        description='ICMP Caesar-cipher reader - Lee PCAP o captura en vivo',
         epilog='Examples:\n'
+               '  sudo python3 readv2.py --pcap captura.pcap\n'
                '  sudo python3 readv2.py --timeout 20\n'
                '  sudo python3 readv2.py 20\n'
                '  sudo python3 readv2.py --text "LARYCXPAJORJ H BNPDARMJM NW ANMNB"\n'
                '  sudo python3 readv2.py',
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument('--text', help='Analyse text directly instead of capturing')
-    parser.add_argument('--timeout', type=int, default=60, help='Capture timeout in seconds (default: 60)')
-    parser.add_argument('--id', type=lambda x: int(x, 0), help='Specific sender ID to capture')
-    parser.add_argument('pos_timeout', nargs='?', type=int, help='Positional timeout argument (legacy support: readv2.py 20)')
+    parser.add_argument('--pcap', help='Leer desde un archivo PCAP (en lugar de captura en vivo)')
+    parser.add_argument('--text', help='Analizar texto directamente')
+    parser.add_argument('--timeout', type=int, default=60, help='Timeout en segundos para captura (default: 60)')
+    parser.add_argument('--id', type=lambda x: int(x, 0), help='ID específico del remitente')
+    parser.add_argument('pos_timeout', nargs='?', type=int, help='Argumento posicional para timeout (readv2.py 20)')
     
     args = parser.parse_args()
     
@@ -331,9 +429,33 @@ def main():
     print("  └──────────────────────────────────────────────────┘")
     print(f"{RESET}")
 
-    if args.text:
+    # ── Modo PCAP ──────────────────────────────────────────────────────────────
+    if args.pcap:
+        if not os.path.exists(args.pcap):
+            print(f"{RED}[!] PCAP file not found: {args.pcap}{RESET}")
+            sys.exit(1)
+        
+        print(f"[*] Reading PCAP file: {args.pcap}")
+        print("-" * 50)
+        
+        packets = read_pcap_scapy(args.pcap)
+        
+        if not packets:
+            print(f"{RED}[!] No ICMP packets found in PCAP{RESET}")
+            print(f"\n{YELLOW}Troubleshooting:{RESET}")
+            print(f"  1. Make sure the PCAP contains ICMP Echo Requests")
+            print(f"  2. Check: tcpdump -r {args.pcap} icmp")
+            sys.exit(1)
+        
+        ciphertext = ''.join(packets[s] for s in sorted(packets))
+        print(f"\n[+] Reconstructed: '{ciphertext}' ({len(ciphertext)} chars)")
+    
+    # ── Modo Texto ─────────────────────────────────────────────────────────────
+    elif args.text:
         ciphertext = args.text
         print(f"[*] Analysing provided text: '{ciphertext}'\n")
+    
+    # ── Modo Captura en vivo ──────────────────────────────────────────────────
     else:
         print(f"[*] Starting capture (timeout={args.timeout}s)")
         print(f"[*] Press Ctrl+C to stop early\n")
@@ -345,11 +467,13 @@ def main():
             print(f"  1. Make sure pingv4.py is running with sudo")
             print(f"  2. Check network: ping -c 1 8.8.8.8")
             print(f"  3. Try: sudo python3 readv2.py --timeout 30")
+            print(f"  4. Or use a PCAP: sudo python3 readv2.py --pcap captura.pcap")
             sys.exit(1)
             
         ciphertext = ''.join(packets[s] for s in sorted(packets))
         print(f"\n[+] Reconstructed: '{ciphertext}' ({len(ciphertext)} chars)")
 
+    # ── Validación y resultados ────────────────────────────────────────────────
     if not any(c.isalpha() for c in ciphertext):
         print(f"{RED}[!] No alphabetic characters found.{RESET}")
         sys.exit(1)
