@@ -220,14 +220,25 @@ def read_pcap_tcpdump(pcap_file: str) -> dict:
                         if hex_line.startswith('0x'):
                             hex_bytes = re.findall(r'[0-9a-f]{2}', hex_line)
                             if hex_bytes:
-                                # Buscar primer byte imprimible
-                                for byte_hex in hex_bytes:
-                                    byte_val = int(byte_hex, 16)
+                                # Buscar en posición fija 53 (timestamp 8 + 0x00x5 + 0x10-0x37)
+                                # El carácter está en la posición 53
+                                target_pos = 53
+                                if len(hex_bytes) > target_pos:
+                                    byte_val = int(hex_bytes[target_pos], 16)
                                     if 32 <= byte_val <= 126:
                                         char = chr(byte_val)
                                         if char.isalnum() or char in ' .,!?':
                                             captured[sequence] = char
                                             print(f"  Seq {sequence:3d} → '{char}' (0x{byte_val:02x})")
+                                            break
+                                # Backup: buscar en posición 13 (estructura anterior)
+                                elif len(hex_bytes) > 13:
+                                    byte_val = int(hex_bytes[13], 16)
+                                    if 32 <= byte_val <= 126:
+                                        char = chr(byte_val)
+                                        if char.isalnum() or char in ' .,!?':
+                                            captured[sequence] = char
+                                            print(f"  Seq {sequence:3d} → '{char}' (0x{byte_val:02x}) [backup]")
                                             break
                                 break
         
@@ -257,8 +268,12 @@ def read_pcap_scapy(pcap_file: str) -> dict:
                 icmp = packet[ICMP]
                 if icmp.type == 8:  # Echo Request
                     raw_data = packet[Raw].load
-                    if len(raw_data) > 0:
-                        char_byte = raw_data[0]
+                    
+                    # Buscar en posición fija 53
+                    # Estructura: timestamp(8) + 0x00x5 + 0x10-0x37(40) = 53 bytes
+                    # El carácter está en la posición 53
+                    if len(raw_data) > 53:
+                        char_byte = raw_data[53]
                         if 32 <= char_byte <= 126:
                             char = chr(char_byte)
                             seq = icmp.seq
@@ -292,11 +307,18 @@ class ICMPCapture:
             return
             
         raw_data = packet[Raw].load
-        if len(raw_data) < 1:
+        
+        # ================================================================
+        # EL CARÁCTER ESTÁ EN LA POSICIÓN 53
+        # Estructura: timestamp(8) + 0x00x5 + 0x10-0x37(40) + carácter
+        # 8 + 5 + 40 = 53
+        # ================================================================
+        
+        if len(raw_data) < 54:
             return
             
-        # El primer byte es nuestro carácter
-        char_byte = raw_data[0]
+        # Buscar el carácter en la posición 53
+        char_byte = raw_data[53]
         
         # Verificar que sea imprimible
         if not (32 <= char_byte <= 126):
